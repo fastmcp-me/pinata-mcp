@@ -2,13 +2,25 @@
   "name": "pinata-mcp",
   "module": "index.ts",
   "type": "module",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "bin": {
+    "pinata-mcp": "./build/index.js"
+  },
+  "scripts": {
+    "build": "tsc && chmod 755 build/index.js"
+  },
+  "files": [
+    "build"
+  ],
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/node": "^22.13.10"
   },
   "peerDependencies": {
-    "typescript": "^5.0.0"
+    "typescript": "^5.8.2"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.6.1"
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "form-data": "^4.0.2"
   }
 }

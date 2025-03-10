@@ -1,21 +1,29 @@
+#!/usr/bin/env node
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-// import fs from "fs"
-// import { basename } from "path";
-// import { ListResourcesRequestSchema, ReadResourceRequestSchema, ReadResourceResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import fs from "fs"
+import path from "path";
+import { ListResourcesRequestSchema, ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const server = new McpServer({
   name: "Pinata",
   version: "1.0.0",
   capabilities: {
-    resources: {
-    }
+    tools: {},
+    resources: {}
   }
 });
 
+server.server.registerCapabilities({
+  resources: {}
+})
+
 // Get JWT token from environment variable
 const PINATA_JWT = process.env.PINATA_JWT;
+
+
 
 // Base headers for all requests
 const getHeaders = () => {
@@ -790,226 +798,300 @@ server.tool(
   }
 );
 
-// // List available resources
-// server.server.setRequestHandler(ListResourcesRequestSchema, async () => {
-//   return {
-//     resources: [
-//       {
-//         uriTemplate: "file://{path}",
-//         name: "Local Files",
-//         description: "Access local files to upload to Pinata IPFS"
-//       }
-//     ]
-//   };
-// });
-
-// // Read resource contents
-// server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-//   const uri = request.params.uri;
-
-//   // Handle file resource
-//   if (uri.startsWith("file://")) {
-//     const filePath = uri.replace("file://", "");
-//     try {
-//       const content = fs.readFileSync(filePath);
-//       const mimeType = getMimeType(filePath);
-
-//       if (isTextFile(mimeType)) {
-//         return {
-//           contents: [
-//             {
-//               uri,
-//               mimeType,
-//               text: content.toString('utf-8')
-//             }
-//           ]
-//         };
-//       } else {
-//         return {
-//           contents: [
-//             {
-//               uri,
-//               mimeType,
-//               blob: content.toString('base64')
-//             }
-//           ]
-//         };
-//       }
-//     } catch (error) {
-//       throw new Error(`Failed to read file: ${error}`);
-//     }
-//   }
-
-//   throw new Error("Unsupported resource URI");
-// });
-
 // Upload file to Pinata
-// server.tool(
-//   "uploadFile",
-//   {
-//     resourceUri: z.string(),
-//     network: z.enum(["public", "private"]).default("private"),
-//     name: z.string().optional(),
-//     group_id: z.string().optional(),
-//     keyvalues: z.record(z.string()).optional(),
-//   },
-//   async ({ resourceUri, network, name, group_id, keyvalues }) => {
-//     try {
-//       if (!resourceUri.startsWith("file://")) {
-//         throw new Error("Resource URI must be a file:// URI");
-//       }
+server.tool(
+  "uploadFile",
+  {
+    resourceUri: z.string().describe("The file:// URI of the file to upload"),
+    network: z.enum(["public", "private"]).default("private").describe("Network to upload to (public or private)"),
+    name: z.string().optional().describe("Custom name for the uploaded file"),
+    group_id: z.string().optional().describe("Optional group ID to add file to"),
+    keyvalues: z.record(z.string()).optional().describe("Optional metadata key-value pairs"),
+  },
+  async ({ resourceUri, network, name, group_id, keyvalues }) => {
+    console.log(resourceUri)
+    try {
+      if (!resourceUri.startsWith("file://")) {
+        throw new Error("Resource URI must be a file:// URI");
+      }
 
-//       const filePath = resourceUri.replace("file://", "");
-//       const blob = new Blob([fs.readFileSync("./hello-world.txt")]);
-//       const fileName = name || basename(filePath);
+      // Properly handle the file path conversion
+      let filePath = resourceUri.replace("file://", "");
 
-//       const formData = new FormData();
-//       formData.append("file", blob, fileName);
-//       formData.append("network", network);
+      // Normalize the path to handle potential issues
+      filePath = path.normalize(filePath);
 
-//       if (name) {
-//         formData.append("name", name);
-//       }
+      if (!fs.existsSync(filePath)) {
+        return {
+          content: [{
+            type: "text",
+            text: `Error: File not found at ${filePath}. Please check the path.`
+          }],
+          isError: true
+        };
+      }
 
-//       if (group_id) {
-//         formData.append("group_id", group_id);
-//       }
+      const fileStats = fs.statSync(filePath);
+      if (!fileStats.isFile()) {
+        return {
+          content: [{
+            type: "text",
+            text: `Error: ${filePath} is not a file.`
+          }],
+          isError: true
+        };
+      }
 
-//       if (keyvalues) {
-//         formData.append("keyvalues", JSON.stringify(keyvalues));
-//       }
+      // Load the whole file into memory as a buffer
+      const fileBuffer = fs.readFileSync(filePath);
 
-//       const headers = {
-//         Authorization: `Bearer ${PINATA_JWT}`,
-//       };
+      const fileName = name || path.basename(filePath);
+      const mimeType = getMimeType(filePath);
 
-//       const response = await fetch("https://uploads.pinata.cloud/v3/files", {
-//         method: "POST",
-//         headers: headers,
-//         body: formData,
-//       });
+      // Create form data for the upload
+      const formData = new FormData();
 
-//       if (!response.ok) {
-//         throw new Error(`Failed to upload file: ${response.status} ${response.statusText}`);
-//       }
+      // Create a blob from the file buffer and append it
+      const blob = new Blob([fileBuffer], { type: mimeType });
 
-//       const data = await response.json();
-//       return {
-//         content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-//       };
-//     } catch (error) {
-//       return {
-//         content: [{ type: "text", text: `Error uploading file: ${error}` }],
-//       };
-//     }
-//   }
-// );
+      formData.append("file", blob, fileName);
 
-// // Tool to vectorize a file
-// server.tool(
-//   "vectorizeFile",
-//   {
-//     file_id: z.string(),
-//   },
-//   async ({ file_id }) => {
-//     try {
-//       const url = `https://uploads.pinata.cloud/v3/vectorize/files/${file_id}`;
+      formData.append("network", network);
 
-//       const response = await fetch(url, {
-//         method: "POST",
-//         headers: getHeaders(),
-//       });
+      if (name) {
+        formData.append("name", name);
+      }
 
-//       if (!response.ok) {
-//         throw new Error(`Failed to vectorize file: ${response.status} ${response.statusText}`);
-//       }
+      if (group_id) {
+        formData.append("group_id", group_id);
+      }
 
-//       const data = await response.json();
-//       return {
-//         content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-//       };
-//     } catch (error) {
-//       return {
-//         content: [{ type: "text", text: `Error: ${error}` }],
-//       };
-//     }
-//   }
-// );
+      if (keyvalues) {
+        formData.append("keyvalues", JSON.stringify(keyvalues));
+      }
 
-// // Tool to query vectors in a group
-// server.tool(
-//   "queryVectors",
-//   {
-//     group_id: z.string(),
-//     text: z.string(),
-//   },
-//   async ({ group_id, text }) => {
-//     try {
-//       const url = `https://uploads.pinata.cloud/v3/vectorize/groups/${group_id}/query`;
+      if (!PINATA_JWT) {
+        throw new Error("PINATA_JWT environment variable is not set");
+      }
 
-//       const payload = {
-//         text,
-//       };
+      const headers = {
+        Authorization: `Bearer ${PINATA_JWT}`,
+      };
 
-//       const response = await fetch(url, {
-//         method: "POST",
-//         headers: getHeaders(),
-//         body: JSON.stringify(payload),
-//       });
+      const response = await fetch("https://uploads.pinata.cloud/v3/files", {
+        method: "POST",
+        headers: headers,
+        body: formData,
+      });
 
-//       if (!response.ok) {
-//         throw new Error(`Failed to query vectors: ${response.status} ${response.statusText}`);
-//       }
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to upload file: ${response.status} ${response.statusText}\n${errorText}`);
+      }
 
-//       const data = await response.json();
-//       return {
-//         content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-//       };
-//     } catch (error) {
-//       return {
-//         content: [{ type: "text", text: `Error: ${error}` }],
-//       };
-//     }
-//   }
-// );
+      const data = await response.json();
+      return {
+        content: [{
+          type: "text",
+          text: `File uploaded successfully!\n\n${JSON.stringify(data, null, 2)}`
+        }],
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error uploading file: ${error}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
 
-// // Helper function to get MIME type from file extension
-// function getMimeType(filePath: string): string {
-//   const extension = filePath.split('.').pop()?.toLowerCase() || '';
-//   const mimeTypes: Record<string, string> = {
-//     'txt': 'text/plain',
-//     'html': 'text/html',
-//     'css': 'text/css',
-//     'js': 'application/javascript',
-//     'json': 'application/json',
-//     'xml': 'application/xml',
-//     'pdf': 'application/pdf',
-//     'jpg': 'image/jpeg',
-//     'jpeg': 'image/jpeg',
-//     'png': 'image/png',
-//     'gif': 'image/gif',
-//     'svg': 'image/svg+xml',
-//     'mp3': 'audio/mpeg',
-//     'mp4': 'video/mp4',
-//     'zip': 'application/zip',
-//     'doc': 'application/msword',
-//     'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-//     'xls': 'application/vnd.ms-excel',
-//     'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-//     'ppt': 'application/vnd.ms-powerpoint',
-//     'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-//   };
+// Tool to vectorize a file
+server.tool(
+  "vectorizeFile",
+  {
+    file_id: z.string(),
+  },
+  async ({ file_id }) => {
+    try {
+      const url = `https://uploads.pinata.cloud/v3/vectorize/files/${file_id}`;
 
-//   return mimeTypes[extension] || 'application/octet-stream';
-// }
+      const response = await fetch(url, {
+        method: "POST",
+        headers: getHeaders(),
+      });
 
-// // Helper function to determine if a file is text-based
-// function isTextFile(mimeType: string): boolean {
-//   return mimeType.startsWith('text/') ||
-//     mimeType === 'application/json' ||
-//     mimeType === 'application/javascript' ||
-//     mimeType === 'application/xml';
-// }
+      if (!response.ok) {
+        throw new Error(`Failed to vectorize file: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return {
+        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error}` }],
+      };
+    }
+  }
+);
+
+// Tool to query vectors in a group
+server.tool(
+  "queryVectors",
+  {
+    group_id: z.string(),
+    text: z.string(),
+  },
+  async ({ group_id, text }) => {
+    try {
+      const url = `https://uploads.pinata.cloud/v3/vectorize/groups/${group_id}/query`;
+
+      const payload = {
+        text,
+      };
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: getHeaders(),
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to query vectors: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return {
+        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error}` }],
+      };
+    }
+  }
+);
+
+// List available resources
+server.server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  return {
+    resources: [
+      {
+        uriTemplate: "file://{path}",
+        name: "Local Files",
+        description: "Access local files to upload to Pinata IPFS"
+      }
+    ]
+  };
+});
+
+// Read resource contents
+server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  const uri = request.params.uri;
+
+  // Handle file resource
+  if (uri.startsWith("file://")) {
+    const filePath = path.normalize(uri.replace("file://", ""));
+
+    try {
+      // Check if the file exists
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`File not found: ${filePath}`);
+      }
+
+      const fileStats = fs.statSync(filePath);
+      if (!fileStats.isFile()) {
+        throw new Error(`Not a file: ${filePath}`);
+      }
+
+      const mimeType = getMimeType(filePath);
+
+      // For text files, read as text
+      if (isTextFile(mimeType)) {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        return {
+          contents: [
+            {
+              uri,
+              mimeType,
+              text: content
+            }
+          ]
+        };
+      } else {
+        // For binary files, use base64 encoding
+        const content = fs.readFileSync(filePath);
+        return {
+          contents: [
+            {
+              uri,
+              mimeType,
+              blob: content.toString('base64')
+            }
+          ]
+        };
+      }
+    } catch (error) {
+      throw new Error(`Failed to read file: ${error}`);
+    }
+  }
+
+  throw new Error("Unsupported resource URI");
+});
+
+
+// Helper function to get MIME type from file extension
+function getMimeType(filePath: string): string {
+  const extension = filePath.split('.').pop()?.toLowerCase() || '';
+  const mimeTypes: Record<string, string> = {
+    'txt': 'text/plain',
+    'html': 'text/html',
+    'css': 'text/css',
+    'js': 'application/javascript',
+    'json': 'application/json',
+    'xml': 'application/xml',
+    'pdf': 'application/pdf',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'png': 'image/png',
+    'gif': 'image/gif',
+    'svg': 'image/svg+xml',
+    'mp3': 'audio/mpeg',
+    'mp4': 'video/mp4',
+    'zip': 'application/zip',
+    'doc': 'application/msword',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'xls': 'application/vnd.ms-excel',
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'ppt': 'application/vnd.ms-powerpoint',
+    'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  };
+
+  return mimeTypes[extension] || 'application/octet-stream';
+}
+
+// Helper function to determine if a file is text-based
+function isTextFile(mimeType: string): boolean {
+  return mimeType.startsWith('text/') ||
+    mimeType === 'application/json' ||
+    mimeType === 'application/javascript' ||
+    mimeType === 'application/xml';
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("Weather MCP Server running on stdio");
+}
+
+main().catch((error) => {
+  console.error("Fatal error in main():", error);
+  process.exit(1);
+});

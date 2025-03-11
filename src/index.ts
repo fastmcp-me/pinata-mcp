@@ -1,11 +1,94 @@
 #!/usr/bin/env node
-
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import fs from "fs"
+import fs from "fs/promises";
+import * as fsSync from "fs";
 import path from "path";
+import os from 'os';
 import { ListResourcesRequestSchema, ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+
+// Command line argument parsing
+const args = process.argv.slice(2);
+if (args.length === 0) {
+  console.error("Usage: pinata-mcp-server <allowed-directory> [additional-directories...]");
+  process.exit(1);
+}
+
+// Normalize all paths consistently
+function normalizePath(p: string): string {
+  return path.normalize(p);
+}
+
+function expandHome(filepath: string): string {
+  if (filepath.startsWith('~/') || filepath === '~') {
+    return path.join(os.homedir(), filepath.slice(1));
+  }
+  return filepath;
+}
+
+// Store allowed directories in normalized form
+const allowedDirectories = args.map(dir =>
+  normalizePath(path.resolve(expandHome(dir)))
+);
+
+// Validate that all directories exist and are accessible
+(async () => {
+  await Promise.all(args.map(async (dir) => {
+    try {
+      const expandedDir = expandHome(dir);
+      const stats = await fs.stat(expandedDir);
+      if (!stats.isDirectory()) {
+        console.error(`Error: ${dir} is not a directory`);
+        process.exit(1);
+      }
+    } catch (error) {
+      console.error(`Error accessing directory ${dir}:`, error);
+      process.exit(1);
+    }
+  }));
+})();
+
+// Security utilities
+async function validatePath(requestedPath: string): Promise<string> {
+  const expandedPath = expandHome(requestedPath);
+  const absolute = path.isAbsolute(expandedPath)
+    ? path.resolve(expandedPath)
+    : path.resolve(process.cwd(), expandedPath);
+
+  const normalizedRequested = normalizePath(absolute);
+
+  // Check if path is within allowed directories
+  const isAllowed = allowedDirectories.some(dir => normalizedRequested.startsWith(dir));
+  if (!isAllowed) {
+    throw new Error(`Access denied - path outside allowed directories: ${absolute} not in ${allowedDirectories.join(', ')}`);
+  }
+
+  // Handle symlinks by checking their real path
+  try {
+    const realPath = await fs.realpath(absolute);
+    const normalizedReal = normalizePath(realPath);
+    const isRealPathAllowed = allowedDirectories.some(dir => normalizedReal.startsWith(dir));
+    if (!isRealPathAllowed) {
+      throw new Error("Access denied - symlink target outside allowed directories");
+    }
+    return realPath;
+  } catch (error) {
+    // For new files that don't exist yet, verify parent directory
+    const parentDir = path.dirname(absolute);
+    try {
+      const realParentPath = await fs.realpath(parentDir);
+      const normalizedParent = normalizePath(realParentPath);
+      const isParentAllowed = allowedDirectories.some(dir => normalizedParent.startsWith(dir));
+      if (!isParentAllowed) {
+        throw new Error("Access denied - parent directory outside allowed directories");
+      }
+      return absolute;
+    } catch {
+      throw new Error(`Parent directory does not exist: ${parentDir}`);
+    }
+  }
+}
 
 const server = new McpServer({
   name: "Pinata",
@@ -22,8 +105,6 @@ server.server.registerCapabilities({
 
 // Get JWT token from environment variable
 const PINATA_JWT = process.env.PINATA_JWT;
-
-
 
 // Base headers for all requests
 const getHeaders = () => {
@@ -120,7 +201,7 @@ server.tool(
     try {
       const url = `https://api.pinata.cloud/v3/files/${network}/${id}`;
 
-      const payload: any = {};
+      const payload: { name?: string; keyvalues?: Record<string, any> } = {};
       if (name) payload.name = name;
       if (keyvalues) payload.keyvalues = keyvalues;
 
@@ -269,7 +350,7 @@ server.tool(
     try {
       const url = `https://api.pinata.cloud/v3/groups/${network}`;
 
-      const payload: any = {
+      const payload: { name: string; is_public?: boolean } = {
         name,
       };
 
@@ -342,7 +423,7 @@ server.tool(
     try {
       const url = `https://api.pinata.cloud/v3/groups/${network}/${id}`;
 
-      const payload: any = {};
+      const payload: { name?: string; is_public?: boolean } = {};
       if (name) payload.name = name;
       if (is_public !== undefined) payload.is_public = is_public;
 
@@ -463,136 +544,6 @@ server.tool(
   }
 );
 
-server.tool(
-  "listAPIKeys",
-  {
-    revoked: z.boolean().optional(),
-    limitedUse: z.boolean().optional(),
-    exhausted: z.boolean().optional(),
-    name: z.string().optional(),
-    offset: z.number().optional(),
-  },
-  async ({ revoked, limitedUse, exhausted, name, offset }) => {
-    try {
-      const params = new URLSearchParams();
-      if (revoked !== undefined) params.append("revoked", revoked.toString());
-      if (limitedUse !== undefined) params.append("limitedUse", limitedUse.toString());
-      if (exhausted !== undefined) params.append("exhausted", exhausted.toString());
-      if (name) params.append("name", name);
-      if (offset) params.append("offset", offset.toString());
-
-      const url = `https://api.pinata.cloud/v3/pinata/keys?${params.toString()}`;
-
-      const response = await fetch(url, {
-        method: "GET",
-        headers: getHeaders(),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to list API keys: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Error: ${error}` }],
-      };
-    }
-  }
-);
-
-server.tool(
-  "createAPIKey",
-  {
-    keyName: z.string(),
-    permissions: z.object({
-      admin: z.boolean().optional(),
-      endpoints: z.object({
-        data: z.object({
-          pinList: z.boolean().optional(),
-          userPinnedDataTotal: z.boolean().optional(),
-        }).optional(),
-        pinning: z.object({
-          hashMetadata: z.boolean().optional(),
-          hashPinPolicy: z.boolean().optional(),
-          pinByHash: z.boolean().optional(),
-          pinFileToIPFS: z.boolean().optional(),
-          pinJSONToIPFS: z.boolean().optional(),
-          pinJobs: z.boolean().optional(),
-          unpin: z.boolean().optional(),
-          userPinPolicy: z.boolean().optional(),
-        }).optional(),
-      }).optional(),
-    }),
-    maxUses: z.number().optional(),
-  },
-  async ({ keyName, permissions, maxUses }) => {
-    try {
-      const url = `https://api.pinata.cloud/v3/pinata/keys`;
-
-      const payload: any = {
-        keyName,
-        permissions,
-      };
-
-      if (maxUses !== undefined) {
-        payload.maxUses = maxUses;
-      }
-
-      const response = await fetch(url, {
-        method: "POST",
-        headers: getHeaders(),
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to create API key: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Error: ${error}` }],
-      };
-    }
-  }
-);
-
-server.tool(
-  "revokeAPIKey",
-  {
-    key: z.string(),
-  },
-  async ({ key }) => {
-    try {
-      const url = `https://api.pinata.cloud/v3/pinata/keys/${key}`;
-
-      const response = await fetch(url, {
-        method: "PUT",
-        headers: getHeaders(),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to revoke API key: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Error: ${error}` }],
-      };
-    }
-  }
-);
 
 server.tool(
   "getSwapHistory",
@@ -697,165 +648,72 @@ server.tool(
   }
 );
 
-server.tool(
-  "getSignature",
-  {
-    network: z.enum(["public", "private"]).default("public"),
-    cid: z.string(),
-  },
-  async ({ network, cid }) => {
-    try {
-      const url = `https://api.pinata.cloud/v3/files/${network}/signature/${cid}`;
-
-      const response = await fetch(url, {
-        method: "GET",
-        headers: getHeaders(),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to get signature: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Error: ${error}` }],
-      };
-    }
-  }
-);
-
-server.tool(
-  "addSignature",
-  {
-    network: z.enum(["public", "private"]).default("public"),
-    cid: z.string(),
-    signature: z.string(),
-    address: z.string(),
-  },
-  async ({ network, cid, signature, address }) => {
-    try {
-      const url = `https://api.pinata.cloud/v3/files/${network}/signature/${cid}`;
-
-      const payload = {
-        signature,
-        address,
-      };
-
-      const response = await fetch(url, {
-        method: "POST",
-        headers: getHeaders(),
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to add signature: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Error: ${error}` }],
-      };
-    }
-  }
-);
-
-server.tool(
-  "removeSignature",
-  {
-    network: z.enum(["public", "private"]).default("public"),
-    cid: z.string(),
-  },
-  async ({ network, cid }) => {
-    try {
-      const url = `https://api.pinata.cloud/v3/files/${network}/signature/${cid}`;
-
-      const response = await fetch(url, {
-        method: "DELETE",
-        headers: getHeaders(),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to remove signature: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Error: ${error}` }],
-      };
-    }
-  }
-);
 
 // Upload file to Pinata
 server.tool(
   "uploadFile",
   {
     resourceUri: z.string().describe("The file:// URI of the file to upload"),
-    network: z.enum(["public", "private"]).default("private").describe("Network to upload to (public or private)"),
-    name: z.string().optional().describe("Custom name for the uploaded file"),
-    group_id: z.string().optional().describe("Optional group ID to add file to"),
-    keyvalues: z.record(z.string()).optional().describe("Optional metadata key-value pairs"),
+    fileContent: z.string().optional().describe("Base64-encoded file content (required in Claude Desktop)"),
+    mimeType: z.string().optional().describe("MIME type of the file"),
+    network: z.enum(["public", "private"]).default("private"),
+    name: z.string().optional(),
+    group_id: z.string().optional(),
+    keyvalues: z.record(z.string()).optional(),
   },
-  async ({ resourceUri, network, name, group_id, keyvalues }) => {
-    console.log(resourceUri)
+  async ({ resourceUri, fileContent, mimeType, network, name, group_id, keyvalues }) => {
     try {
-      if (!resourceUri.startsWith("file://")) {
-        throw new Error("Resource URI must be a file:// URI");
+      let fileBuffer;
+      let fileName;
+
+      // Handle two different modes of operation:
+      if (fileContent) {
+        // Direct content mode (for Claude Desktop)
+        fileBuffer = Buffer.from(fileContent, 'base64');
+        fileName = name || resourceUri.split('/').pop() || 'uploaded-file';
+        console.log("Using provided file content, size:", fileBuffer.length);
+      } else {
+        // File path mode (for project environments)
+        if (!resourceUri.startsWith("file://")) {
+          throw new Error("Resource URI must be a file:// URI when not providing direct file content");
+        }
+
+        // Extract file path from URI
+        let filePath;
+        if (process.platform === 'win32') {
+          filePath = decodeURIComponent(resourceUri.replace(/^file:\/\/\//, '').replace(/\//g, '\\'));
+        } else {
+          filePath = decodeURIComponent(resourceUri.replace(/^file:\/\//, ''));
+        }
+
+        console.log("Resolved filePath:", filePath);
+
+        try {
+          // Validate path is allowed
+          filePath = await validatePath(filePath);
+          fileBuffer = await fs.readFile(filePath);
+          fileName = name || path.basename(filePath);
+        } catch (err) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error: Cannot read file at ${filePath}.
+Current working directory: ${process.cwd()}
+Error details: ${err}
+Note: When using Claude Desktop, you must provide fileContent parameter with base64-encoded file data.`
+            }],
+            isError: true
+          };
+        }
       }
 
-      // Properly handle the file path conversion
-      let filePath = resourceUri.replace("file://", "");
-
-      // Normalize the path to handle potential issues
-      filePath = path.normalize(filePath);
-
-      if (!fs.existsSync(filePath)) {
-        return {
-          content: [{
-            type: "text",
-            text: `Error: File not found at ${filePath}. Please check the path.`
-          }],
-          isError: true
-        };
-      }
-
-      const fileStats = fs.statSync(filePath);
-      if (!fileStats.isFile()) {
-        return {
-          content: [{
-            type: "text",
-            text: `Error: ${filePath} is not a file.`
-          }],
-          isError: true
-        };
-      }
-
-      // Load the whole file into memory as a buffer
-      const fileBuffer = fs.readFileSync(filePath);
-
-      const fileName = name || path.basename(filePath);
-      const mimeType = getMimeType(filePath);
+      // Determine MIME type if not provided
+      const detectedMimeType = mimeType || getMimeType(fileName);
 
       // Create form data for the upload
       const formData = new FormData();
-
-      // Create a blob from the file buffer and append it
-      const blob = new Blob([fileBuffer], { type: mimeType });
-
+      const blob = new Blob([fileBuffer], { type: detectedMimeType });
       formData.append("file", blob, fileName);
-
       formData.append("network", network);
 
       if (name) {
@@ -870,17 +728,12 @@ server.tool(
         formData.append("keyvalues", JSON.stringify(keyvalues));
       }
 
-      if (!PINATA_JWT) {
-        throw new Error("PINATA_JWT environment variable is not set");
-      }
-
-      const headers = {
-        Authorization: `Bearer ${PINATA_JWT}`,
-      };
-
+      // Send request to Pinata
       const response = await fetch("https://uploads.pinata.cloud/v3/files", {
         method: "POST",
-        headers: headers,
+        headers: {
+          Authorization: `Bearer ${PINATA_JWT}`,
+        },
         body: formData,
       });
 
@@ -908,71 +761,17 @@ server.tool(
   }
 );
 
-// Tool to vectorize a file
+// Add a tool to list allowed directories
 server.tool(
-  "vectorizeFile",
-  {
-    file_id: z.string(),
-  },
-  async ({ file_id }) => {
-    try {
-      const url = `https://uploads.pinata.cloud/v3/vectorize/files/${file_id}`;
-
-      const response = await fetch(url, {
-        method: "POST",
-        headers: getHeaders(),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to vectorize file: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Error: ${error}` }],
-      };
-    }
-  }
-);
-
-// Tool to query vectors in a group
-server.tool(
-  "queryVectors",
-  {
-    group_id: z.string(),
-    text: z.string(),
-  },
-  async ({ group_id, text }) => {
-    try {
-      const url = `https://uploads.pinata.cloud/v3/vectorize/groups/${group_id}/query`;
-
-      const payload = {
-        text,
-      };
-
-      const response = await fetch(url, {
-        method: "POST",
-        headers: getHeaders(),
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to query vectors: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Error: ${error}` }],
-      };
-    }
+  "listAllowedDirectories",
+  {},
+  async () => {
+    return {
+      content: [{
+        type: "text",
+        text: `Allowed directories:\n${allowedDirectories.join('\n')}`
+      }],
+    };
   }
 );
 
@@ -983,7 +782,7 @@ server.server.setRequestHandler(ListResourcesRequestSchema, async () => {
       {
         uriTemplate: "file://{path}",
         name: "Local Files",
-        description: "Access local files to upload to Pinata IPFS"
+        description: "Access local files to upload to Pinata IPFS (only from allowed directories)"
       }
     ]
   };
@@ -992,18 +791,21 @@ server.server.setRequestHandler(ListResourcesRequestSchema, async () => {
 // Read resource contents
 server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   const uri = request.params.uri;
+  console.log("Requested URI:", uri);
 
   // Handle file resource
   if (uri.startsWith("file://")) {
-    const filePath = path.normalize(uri.replace("file://", ""));
+    let filePath = decodeURIComponent(uri.replace(/^file:\/\//, ''));
+    if (process.platform === 'win32') {
+      filePath = filePath.replace(/\//g, '\\');
+    }
 
     try {
-      // Check if the file exists
-      if (!fs.existsSync(filePath)) {
-        throw new Error(`File not found: ${filePath}`);
-      }
+      // Validate path is allowed
+      filePath = await validatePath(filePath);
 
-      const fileStats = fs.statSync(filePath);
+      // Check if the file exists
+      const fileStats = await fs.stat(filePath);
       if (!fileStats.isFile()) {
         throw new Error(`Not a file: ${filePath}`);
       }
@@ -1012,7 +814,7 @@ server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
       // For text files, read as text
       if (isTextFile(mimeType)) {
-        const content = fs.readFileSync(filePath, 'utf-8');
+        const content = await fs.readFile(filePath, 'utf-8');
         return {
           contents: [
             {
@@ -1024,7 +826,7 @@ server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
         };
       } else {
         // For binary files, use base64 encoding
-        const content = fs.readFileSync(filePath);
+        const content = await fs.readFile(filePath);
         return {
           contents: [
             {
@@ -1082,13 +884,11 @@ function isTextFile(mimeType: string): boolean {
     mimeType === 'application/xml';
 }
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
-
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Weather MCP Server running on stdio");
+  console.error("Pinata MCP Server running on stdio");
+  console.error("Allowed directories:", allowedDirectories);
 }
 
 main().catch((error) => {

@@ -653,7 +653,7 @@ server.tool(
 server.tool(
   "uploadFile",
   {
-    resourceUri: z.string().describe("The file:// URI of the file to upload"),
+    resourceUri: z.string().optional().describe("The file:// URI of the file to upload"),
     fileContent: z.string().optional().describe("Base64-encoded file content (required in Claude Desktop)"),
     mimeType: z.string().optional().describe("MIME type of the file"),
     network: z.enum(["public", "private"]).default("private"),
@@ -663,16 +663,16 @@ server.tool(
   },
   async ({ resourceUri, fileContent, mimeType, network, name, group_id, keyvalues }) => {
     try {
-      let fileBuffer;
-      let fileName;
+      let fileBuffer: Buffer;
+      let fileName: string;
 
       // Handle two different modes of operation:
-      if (fileContent) {
+      if (fileContent && !resourceUri) {
         // Direct content mode (for Claude Desktop)
         fileBuffer = Buffer.from(fileContent, 'base64');
-        fileName = name || resourceUri.split('/').pop() || 'uploaded-file';
+        fileName = name || 'uploaded-file';
         console.log("Using provided file content, size:", fileBuffer.length);
-      } else {
+      } else if (resourceUri) {
         // File path mode (for project environments)
         if (!resourceUri.startsWith("file://")) {
           throw new Error("Resource URI must be a file:// URI when not providing direct file content");
@@ -705,6 +705,9 @@ Note: When using Claude Desktop, you must provide fileContent parameter with bas
             isError: true
           };
         }
+      } else {
+        // Neither resourceUri nor fileContent provided
+        throw new Error("Either resourceUri or fileContent must be provided");
       }
 
       // Determine MIME type if not provided
@@ -753,7 +756,7 @@ Note: When using Claude Desktop, you must provide fileContent parameter with bas
       return {
         content: [{
           type: "text",
-          text: `Error uploading file: ${error}`
+          text: `Error uploading file: ${error instanceof Error ? error.message : String(error)}`
         }],
         isError: true
       };

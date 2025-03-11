@@ -1,13 +1,12 @@
 {
   "name": "pinata-mcp",
   "module": "index.ts",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "pinata-mcp": "./index.js",
-    "dev": "tsc --watch"
+    "pinata-mcp": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc && chmod 755 dist/index.js"

@@ -5,7 +5,7 @@ import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
 import os from 'os';
-import { ListResourcesRequestSchema, ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { ListToolsRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 // Command line argument parsing
 const args = process.argv.slice(2);
@@ -305,15 +305,13 @@ server.tool(
   {
     network: z.enum(["public", "private"]).default("public"),
     name: z.string().optional(),
-    isPublic: z.boolean().optional(),
     limit: z.number().optional(),
     pageToken: z.string().optional(),
   },
-  async ({ network, name, isPublic, limit, pageToken }) => {
+  async ({ network, name, limit, pageToken }) => {
     try {
       const params = new URLSearchParams();
       if (name) params.append("name", name);
-      if (isPublic !== undefined) params.append("isPublic", isPublic.toString());
       if (limit) params.append("limit", limit.toString());
       if (pageToken) params.append("pageToken", pageToken);
 
@@ -345,19 +343,14 @@ server.tool(
   {
     network: z.enum(["public", "private"]).default("public"),
     name: z.string(),
-    is_public: z.boolean().optional(),
   },
-  async ({ network, name, is_public }) => {
+  async ({ network, name }) => {
     try {
       const url = `https://api.pinata.cloud/v3/groups/${network}`;
 
       const payload: { name: string; is_public?: boolean } = {
         name,
       };
-
-      if (is_public !== undefined) {
-        payload.is_public = is_public;
-      }
 
       const response = await fetch(url, {
         method: "POST",
@@ -418,15 +411,13 @@ server.tool(
     network: z.enum(["public", "private"]).default("public"),
     id: z.string(),
     name: z.string().optional(),
-    is_public: z.boolean().optional(),
   },
-  async ({ network, id, name, is_public }) => {
+  async ({ network, id, name }) => {
     try {
       const url = `https://api.pinata.cloud/v3/groups/${network}/${id}`;
 
       const payload: { name?: string; is_public?: boolean } = {};
       if (name) payload.name = name;
-      if (is_public !== undefined) payload.is_public = is_public;
 
       const response = await fetch(url, {
         method: "PUT",
@@ -554,7 +545,7 @@ server.tool(
     resourceUri: z.string().optional().describe("The file:// URI of the file to upload"),
     fileContent: z.string().optional().describe("Base64-encoded file content (required in Claude Desktop)"),
     mimeType: z.string().optional().describe("MIME type of the file"),
-    network: z.enum(["public", "private"]).default("private"),
+    network: z.enum(["public", "private"]).default("public"),
     name: z.string().optional(),
     group_id: z.string().optional(),
     keyvalues: z.record(z.string()).optional(),
@@ -661,90 +652,6 @@ Note: When using Claude Desktop, you must provide fileContent parameter with bas
     }
   }
 );
-
-// Add a tool to list allowed directories
-server.tool(
-  "listAllowedDirectories",
-  {},
-  async () => {
-    return {
-      content: [{
-        type: "text",
-        text: `Allowed directories:\n${allowedDirectories.join('\n')}`
-      }],
-    };
-  }
-);
-
-// List available resources
-server.server.setRequestHandler(ListResourcesRequestSchema, async () => {
-  return {
-    resources: [
-      {
-        uriTemplate: "file://{path}",
-        name: "Local Files",
-        description: "Access local files to upload to Pinata IPFS (only from allowed directories)"
-      }
-    ]
-  };
-});
-
-// Read resource contents
-server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-  const uri = request.params.uri;
-  console.log("Requested URI:", uri);
-
-  // Handle file resource
-  if (uri.startsWith("file://")) {
-    let filePath = decodeURIComponent(uri.replace(/^file:\/\//, ''));
-    if (process.platform === 'win32') {
-      filePath = filePath.replace(/\//g, '\\');
-    }
-
-    try {
-      // Validate path is allowed
-      filePath = await validatePath(filePath);
-
-      // Check if the file exists
-      const fileStats = await fs.stat(filePath);
-      if (!fileStats.isFile()) {
-        throw new Error(`Not a file: ${filePath}`);
-      }
-
-      const mimeType = getMimeType(filePath);
-
-      // For text files, read as text
-      if (isTextFile(mimeType)) {
-        const content = await fs.readFile(filePath, 'utf-8');
-        return {
-          contents: [
-            {
-              uri,
-              mimeType,
-              text: content
-            }
-          ]
-        };
-      } else {
-        // For binary files, use base64 encoding
-        const content = await fs.readFile(filePath);
-        return {
-          contents: [
-            {
-              uri,
-              mimeType,
-              blob: content.toString('base64')
-            }
-          ]
-        };
-      }
-    } catch (error) {
-      throw new Error(`Failed to read file: ${error}`);
-    }
-  }
-
-  throw new Error("Unsupported resource URI");
-});
 
 server.tool(
   "fetchFromGateway",
@@ -886,6 +793,460 @@ server.tool(
     }
   }
 );
+
+// Add a tool to list allowed directories
+server.tool(
+  "listAllowedDirectories",
+  {},
+  async () => {
+    return {
+      content: [{
+        type: "text",
+        text: `Allowed directories:\n${allowedDirectories.join('\n')}`
+      }],
+    };
+  }
+);
+
+// List available resources
+server.server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  return {
+    resources: [
+      {
+        uriTemplate: "file://{path}",
+        name: "Local Files",
+        description: "Access local files to upload to Pinata IPFS (only from allowed directories)"
+      }
+    ]
+  };
+});
+
+// Read resource contents
+server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  const uri = request.params.uri;
+  console.log("Requested URI:", uri);
+
+  // Handle file resource
+  if (uri.startsWith("file://")) {
+    let filePath = decodeURIComponent(uri.replace(/^file:\/\//, ''));
+    if (process.platform === 'win32') {
+      filePath = filePath.replace(/\//g, '\\');
+    }
+
+    try {
+      // Validate path is allowed
+      filePath = await validatePath(filePath);
+
+      // Check if the file exists
+      const fileStats = await fs.stat(filePath);
+      if (!fileStats.isFile()) {
+        throw new Error(`Not a file: ${filePath}`);
+      }
+
+      const mimeType = getMimeType(filePath);
+
+      // For text files, read as text
+      if (isTextFile(mimeType)) {
+        const content = await fs.readFile(filePath, 'utf-8');
+        return {
+          contents: [
+            {
+              uri,
+              mimeType,
+              text: content
+            }
+          ]
+        };
+      } else {
+        // For binary files, use base64 encoding
+        const content = await fs.readFile(filePath);
+        return {
+          contents: [
+            {
+              uri,
+              mimeType,
+              blob: content.toString('base64')
+            }
+          ]
+        };
+      }
+    } catch (error) {
+      throw new Error(`Failed to read file: ${error}`);
+    }
+  }
+
+  throw new Error("Unsupported resource URI");
+});
+
+
+
+server.server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return {
+    tools: [
+      {
+        name: "searchFiles",
+        description: "Search for files in your Pinata account by name, CID, or MIME type. Returns a list of files matching the given criteria.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether to search in public or private IPFS",
+              default: "public"
+            },
+            name: {
+              type: "string",
+              description: "Search by filename (optional)"
+            },
+            cid: {
+              type: "string",
+              description: "Search by content ID (optional)"
+            },
+            mimeType: {
+              type: "string",
+              description: "Search by MIME type (optional)"
+            },
+            limit: {
+              type: "number",
+              description: "Maximum number of results to return (optional)"
+            }
+          }
+        },
+      },
+      {
+        name: "getFileById",
+        description: "Retrieve detailed information about a specific file stored on Pinata by its ID.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether the file is in public or private IPFS",
+              default: "public"
+            },
+            id: {
+              type: "string",
+              description: "The ID of the file to retrieve"
+            }
+          },
+          required: ["id"]
+        },
+      },
+      {
+        name: "updateFile",
+        description: "Update metadata for an existing file on Pinata. Can update the name and keyvalues (metadata).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether the file is in public or private storage",
+              default: "public"
+            },
+            id: {
+              type: "string",
+              description: "The ID of the file to update"
+            },
+            name: {
+              type: "string",
+              description: "New name for the file (optional)"
+            },
+            keyvalues: {
+              type: "object",
+              description: "Metadata key-value pairs to update (optional)"
+            }
+          },
+          required: ["id"]
+        },
+      },
+      {
+        name: "deleteFile",
+        description: "Delete a file from your Pinata account by its ID.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether the file is in public or private IPFS",
+              default: "public"
+            },
+            id: {
+              type: "string",
+              description: "The ID of the file to delete"
+            }
+          },
+          required: ["id"]
+        },
+      },
+      {
+        name: "createPrivateDownloadLink",
+        description: "Generate a temporary download link for accessing a private ipfs file from Pinata.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            cid: {
+              type: "string",
+              description: "The content ID (CID) of the file"
+            },
+            expires: {
+              type: "number",
+              description: "Expiration time in seconds for the download link"
+            }
+          },
+          required: ["cid", "expires"]
+        },
+      },
+      {
+        name: "listGroups",
+        description: "List groups in your Pinata account, with optional filtering by name.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether to list groups in public or private IPFS",
+              default: "public"
+            },
+            name: {
+              type: "string",
+              description: "Filter groups by name (optional)"
+            },
+            isPublic: {
+              type: "boolean",
+              description: "Filter groups by public status (optional)"
+            },
+            limit: {
+              type: "number",
+              description: "Maximum number of results to return (optional)"
+            },
+            pageToken: {
+              type: "string",
+              description: "Token for pagination (optional)"
+            }
+          }
+        },
+      },
+      {
+        name: "createGroup",
+        description: "Create a new group in your Pinata account to organize files.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether to create the group in public or private IPFS",
+              default: "public"
+            },
+            name: {
+              type: "string",
+              description: "Name for the new group"
+            },
+            is_public: {
+              type: "boolean",
+              description: "Whether the group should be public (optional)"
+            }
+          },
+          required: ["name"]
+        },
+      },
+      {
+        name: "getGroup",
+        description: "Retrieve detailed information about a specific group by its ID.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether the group is in public or private IPFS",
+              default: "public"
+            },
+            id: {
+              type: "string",
+              description: "The ID of the group to retrieve"
+            }
+          },
+          required: ["id"]
+        },
+      },
+      {
+        name: "updateGroup",
+        description: "Update metadata for an existing group on Pinata. Can update the name.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether the group is in public or private IPFS",
+              default: "public"
+            },
+            id: {
+              type: "string",
+              description: "The ID of the group to update"
+            },
+            name: {
+              type: "string",
+              description: "New name for the group (optional)"
+            },
+          },
+          required: ["id"]
+        },
+      },
+      {
+        name: "deleteGroup",
+        description: "Delete a group from your Pinata storage by its ID.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether the group is in public or private IPFS",
+              default: "public"
+            },
+            id: {
+              type: "string",
+              description: "The ID of the group to delete"
+            }
+          },
+          required: ["id"]
+        },
+      },
+      {
+        name: "addFileToGroup",
+        description: "Add an existing file to a group in your Pinata account.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether the group and file are in public or private IPFS",
+              default: "public"
+            },
+            groupId: {
+              type: "string",
+              description: "The ID of the group to add the file to"
+            },
+            fileId: {
+              type: "string",
+              description: "The ID of the file to add to the group"
+            }
+          },
+          required: ["groupId", "fileId"]
+        },
+      },
+      {
+        name: "removeFileFromGroup",
+        description: "Remove a file from a group in your Pinata account.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether the group and file are in public or private IPFS",
+              default: "public"
+            },
+            groupId: {
+              type: "string",
+              description: "The ID of the group to remove the file from"
+            },
+            fileId: {
+              type: "string",
+              description: "The ID of the file to remove from the group"
+            }
+          },
+          required: ["groupId", "fileId"]
+        },
+      },
+      {
+        name: "uploadFile",
+        description: "Upload a file to Pinata Public of Private IPFS. Can upload from local filesystem or directly from provided content.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            resourceUri: {
+              type: "string",
+              description: "The file:// URI of the file to upload (optional if providing fileContent)"
+            },
+            fileContent: {
+              type: "string",
+              description: "Base64-encoded file content (required in Claude Desktop or when not using resourceUri)"
+            },
+            mimeType: {
+              type: "string",
+              description: "MIME type of the file (optional, will be detected from filename if not provided)"
+            },
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether to upload to public or private IPFS",
+              default: "public"
+            },
+            name: {
+              type: "string",
+              description: "Custom name for the file (optional)"
+            },
+            group_id: {
+              type: "string",
+              description: "ID of a group to add the file to (optional)"
+            },
+            keyvalues: {
+              type: "object",
+              description: "Metadata key-value pairs for the file (optional)"
+            }
+          }
+        },
+      },
+      {
+        name: "fetchFromGateway",
+        description: "Fetch a file from Public or Private IPFS via Pinata gateway. Can retrieve public and private files and optionally save to local filesystem.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            cid: {
+              type: "string",
+              description: "The CID of the file to fetch"
+            },
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether the file is on public or private IPFS",
+              default: "public"
+            },
+            saveToPath: {
+              type: "string",
+              description: "Optional local file path to save the fetched content"
+            },
+            returnContent: {
+              type: "boolean",
+              description: "Whether to return the content directly (not recommended for large files)",
+              default: false
+            }
+          },
+          required: ["cid"]
+        },
+      },
+      {
+        name: "listAllowedDirectories",
+        description: "List all directories that this MCP server is allowed to access for file operations.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          required: []
+        },
+      }
+    ],
+  };
+});
 
 // Helper function to get MIME type from file extension
 function getMimeType(filePath: string): string {

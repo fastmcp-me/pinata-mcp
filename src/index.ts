@@ -3,7 +3,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import fs from "fs/promises";
-import * as fsSync from "fs";
 import path from "path";
 import os from 'os';
 import { ListResourcesRequestSchema, ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -103,8 +102,8 @@ server.server.registerCapabilities({
   resources: {}
 })
 
-// Get JWT token from environment variable
 const PINATA_JWT = process.env.PINATA_JWT;
+const GATEWAY_URL = process.env.GATEWAY_URL;
 
 // Base headers for all requests
 const getHeaders = () => {
@@ -261,20 +260,22 @@ server.tool(
 server.tool(
   "createPrivateDownloadLink",
   {
-    url: z.string(),
+    cid: z.string(),
     expires: z.number(),
-    date: z.number(),
-    method: z.enum(["GET"]).default("GET"),
   },
-  async ({ url, expires, date, method }) => {
+  async ({ cid, expires }) => {
     try {
       const apiUrl = `https://api.pinata.cloud/v3/files/private/download_link`;
+
+      const url = `https://${GATEWAY_URL}/files/${cid}`
+
+      const date = Math.floor(new Date().getTime() / 1000)
 
       const payload = {
         url,
         expires,
         date,
-        method,
+        method: "GET",
       };
 
       const response = await fetch(apiUrl, {
@@ -545,109 +546,6 @@ server.tool(
 );
 
 
-server.tool(
-  "getSwapHistory",
-  {
-    network: z.enum(["public", "private"]).default("public"),
-    cid: z.string(),
-    domain: z.string(),
-  },
-  async ({ network, cid, domain }) => {
-    try {
-      const params = new URLSearchParams();
-      params.append("domain", domain);
-
-      const url = `https://api.pinata.cloud/v3/files/${network}/swap/${cid}?${params.toString()}`;
-
-      const response = await fetch(url, {
-        method: "GET",
-        headers: getHeaders(),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to get swap history: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Error: ${error}` }],
-      };
-    }
-  }
-);
-
-server.tool(
-  "addSwap",
-  {
-    network: z.enum(["public", "private"]).default("public"),
-    cid: z.string(),
-    swap_cid: z.string(),
-  },
-  async ({ network, cid, swap_cid }) => {
-    try {
-      const url = `https://api.pinata.cloud/v3/files/${network}/swap/${cid}`;
-
-      const payload = {
-        swap_cid,
-      };
-
-      const response = await fetch(url, {
-        method: "PUT",
-        headers: getHeaders(),
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to add swap: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Error: ${error}` }],
-      };
-    }
-  }
-);
-
-server.tool(
-  "removeSwap",
-  {
-    network: z.enum(["public", "private"]).default("public"),
-    cid: z.string(),
-  },
-  async ({ network, cid }) => {
-    try {
-      const url = `https://api.pinata.cloud/v3/files/${network}/swap/${cid}`;
-
-      const response = await fetch(url, {
-        method: "DELETE",
-        headers: getHeaders(),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to remove swap: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Error: ${error}` }],
-      };
-    }
-  }
-);
-
 
 // Upload file to Pinata
 server.tool(
@@ -848,6 +746,146 @@ server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   throw new Error("Unsupported resource URI");
 });
 
+server.tool(
+  "fetchFromGateway",
+  {
+    cid: z.string().describe("The CID of the file to fetch"),
+    network: z.enum(["public", "private"]).default("public").describe("Whether the file is on public or private IPFS"),
+    saveToPath: z.string().optional().describe("Optional local file path to save the fetched content"),
+    returnContent: z.boolean().default(false).describe("Whether to return the content directly (not recommended for large files)")
+  },
+  async ({ cid, network, saveToPath, returnContent }) => {
+    try {
+      if (!GATEWAY_URL) {
+        throw new Error("GATEWAY_URL environment variable is not set");
+      }
+
+      let fileUrl;
+      let response;
+
+      if (network === "public") {
+        // For public IPFS, we can access directly through the gateway
+        fileUrl = `https://${GATEWAY_URL}/ipfs/${cid}`;
+        response = await fetch(fileUrl);
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch public file: ${response.status} ${response.statusText}`);
+        }
+      } else {
+        // For private IPFS, we need to create a download link first
+        if (!PINATA_JWT) {
+          throw new Error("PINATA_JWT environment variable is not set");
+        }
+
+        // The URL for the download link API
+        const filePath = `https://${GATEWAY_URL}/files/${cid}`;
+        const apiUrl = `https://api.pinata.cloud/v3/files/private/download_link`;
+
+        // Current timestamp and expiration (e.g., 10 minutes from now)
+        const date = Math.floor(new Date().getTime() / 1000);
+        const expires = 600; // 10 minutes
+
+        const payload = {
+          url: filePath,
+          expires,
+          date,
+          method: "GET"
+        };
+
+        // Create the download link
+        const linkResponse = await fetch(apiUrl, {
+          method: "POST",
+          headers: getHeaders(),
+          body: JSON.stringify(payload)
+        });
+
+        if (!linkResponse.ok) {
+          const errorText = await linkResponse.text();
+          throw new Error(`Failed to create download link: ${linkResponse.status} ${linkResponse.statusText}. Response: ${errorText}`);
+        }
+
+        const linkData = await linkResponse.json();
+
+        if (!linkData.data) {
+          throw new Error("Failed to get download URL from response");
+        }
+
+        // Use the generated download link
+        fileUrl = linkData.data;
+        response = await fetch(fileUrl);
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch private file: ${response.status} ${response.statusText}`);
+        }
+      }
+
+      // Get content type from headers
+      const contentType = response.headers.get("content-type") || "application/octet-stream";
+
+      // Handle the response based on the options
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+
+      // If a save path is provided, save the file
+      if (saveToPath) {
+        // Validate the save path is allowed
+        const validatedPath = await validatePath(saveToPath);
+
+        // Create directory if it doesn't exist
+        const dir = path.dirname(validatedPath);
+        await fs.mkdir(dir, { recursive: true });
+
+        // Save the file
+        await fs.writeFile(validatedPath, buffer);
+      }
+
+      // Return appropriate response
+      let resultText = "";
+      if (network === "public") {
+        resultText = `✅ Fetched ${buffer.length} bytes from public IPFS (CID: ${cid})`;
+      } else {
+        resultText = `✅ Fetched ${buffer.length} bytes from private IPFS (CID: ${cid})`;
+      }
+
+      if (saveToPath) {
+        resultText += `\nFile saved to: ${saveToPath}`;
+      }
+
+      // Return content if requested and if it's reasonable to do so
+      if (returnContent) {
+        // If it's a text file and not too large, return as text
+        if (contentType.startsWith("text/") ||
+          contentType.includes("json") ||
+          contentType.includes("javascript") ||
+          contentType.includes("xml")) {
+          if (buffer.length < 100000) { // Less than 100KB
+            const textContent = buffer.toString('utf-8');
+            resultText += `\n\nContent:\n${textContent}`;
+          } else {
+            resultText += `\n\nContent too large to display (${buffer.length} bytes). File was saved${saveToPath ? ` to ${saveToPath}` : ' but not returned'}.`;
+          }
+        } else if (buffer.length < 50000) { // Less than 50KB for binary files
+          // For small binary files, return base64
+          resultText += `\n\nBase64 Content (${contentType}):\n${buffer.toString('base64')}`;
+        } else {
+          resultText += `\n\nContent too large to display (${buffer.length} bytes). File was saved${saveToPath ? ` to ${saveToPath}` : ' but not returned'}.`;
+        }
+      }
+
+      return {
+        content: [{ type: "text", text: resultText }],
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error fetching file: ${error instanceof Error ? error.message : String(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
 
 // Helper function to get MIME type from file extension
 function getMimeType(filePath: string): string {

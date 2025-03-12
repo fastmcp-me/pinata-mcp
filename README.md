@@ -40,7 +40,7 @@ Add the following config to `claude_desktop_config.json`
       ],
       "env": {
         "PINATA_JWT": "<YOUR_JWT>",
-        "GATEWAY_URL": "example.mypinata.cloud
+        "GATEWAY_URL": "example.mypinata.cloud"
       }
     }
   }

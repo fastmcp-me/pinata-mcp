@@ -560,7 +560,6 @@ server.tool(
         // Direct content mode (for Claude Desktop)
         fileBuffer = Buffer.from(fileContent, 'base64');
         fileName = name || 'uploaded-file';
-        console.log("Using provided file content, size:", fileBuffer.length);
       } else if (resourceUri) {
         // File path mode (for project environments)
         if (!resourceUri.startsWith("file://")) {
@@ -574,8 +573,6 @@ server.tool(
         } else {
           filePath = decodeURIComponent(resourceUri.replace(/^file:\/\//, ''));
         }
-
-        console.log("Resolved filePath:", filePath);
 
         try {
           // Validate path is allowed
@@ -646,6 +643,90 @@ Note: When using Claude Desktop, you must provide fileContent parameter with bas
         content: [{
           type: "text",
           text: `Error uploading file: ${error instanceof Error ? error.message : String(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+server.tool(
+  "createLink",
+  {
+    cid: z.string().describe("The CID of the file to create a link for"),
+    network: z.enum(["public", "private"]).default("public").describe("Whether the file is on public or private IPFS"),
+    expires: z.number().optional().default(600).describe("Expiration time in seconds for private download links")
+  },
+  async ({ cid, network, expires = 600 }) => {
+    try {
+      if (!GATEWAY_URL) {
+        throw new Error("GATEWAY_URL environment variable is not set");
+      }
+
+      let fileUrl;
+
+      if (network === "public") {
+        // For public IPFS, we can access directly through the gateway
+        fileUrl = `https://${GATEWAY_URL}/ipfs/${cid}`;
+        return {
+          content: [{
+            type: "text",
+            text: `✅ Public IPFS link created:\n${fileUrl}`
+          }],
+        };
+      } else {
+        // For private IPFS, we need to create a download link
+        if (!PINATA_JWT) {
+          throw new Error("PINATA_JWT environment variable is not set");
+        }
+
+        // The URL for the download link API
+        const filePath = `https://${GATEWAY_URL}/files/${cid}`;
+        const apiUrl = `https://api.pinata.cloud/v3/files/private/download_link`;
+
+        // Current timestamp and provided expiration
+        const date = Math.floor(new Date().getTime() / 1000);
+
+        const payload = {
+          url: filePath,
+          expires,
+          date,
+          method: "GET"
+        };
+
+        // Create the download link
+        const linkResponse = await fetch(apiUrl, {
+          method: "POST",
+          headers: getHeaders(),
+          body: JSON.stringify(payload)
+        });
+
+        if (!linkResponse.ok) {
+          const errorText = await linkResponse.text();
+          throw new Error(`Failed to create download link: ${linkResponse.status} ${linkResponse.statusText}. Response: ${errorText}`);
+        }
+
+        const linkData = await linkResponse.json();
+
+        if (!linkData.data) {
+          throw new Error("Failed to get download URL from response");
+        }
+
+        fileUrl = linkData.data;
+        const expirationTime = new Date((date + expires) * 1000).toLocaleString();
+
+        return {
+          content: [{
+            type: "text",
+            text: `✅ Private IPFS temporary link created:\n${fileUrl}\n\nThis link will expire at: ${expirationTime} (${expires} seconds from creation)`
+          }],
+        };
+      }
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error creating link: ${error instanceof Error ? error.message : String(error)}`
         }],
         isError: true
       };
@@ -824,7 +905,6 @@ server.server.setRequestHandler(ListResourcesRequestSchema, async () => {
 // Read resource contents
 server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   const uri = request.params.uri;
-  console.log("Requested URI:", uri);
 
   // Handle file resource
   if (uri.startsWith("file://")) {
@@ -998,6 +1078,31 @@ server.server.setRequestHandler(ListToolsRequestSchema, async () => {
             }
           },
           required: ["cid", "expires"]
+        },
+      },
+      {
+        name: "createLink",
+        description: "Create a direct access link for a file stored on Pinata IPFS. For private files, generates a temporary download link.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            cid: {
+              type: "string",
+              description: "The CID of the file to create a link for"
+            },
+            network: {
+              type: "string",
+              enum: ["public", "private"],
+              description: "Whether the file is on public or private IPFS",
+              default: "public"
+            },
+            expires: {
+              type: "number",
+              description: "Expiration time in seconds for private download links",
+              default: 600
+            }
+          },
+          required: ["cid"]
         },
       },
       {
